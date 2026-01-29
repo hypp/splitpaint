@@ -331,6 +331,39 @@ impl Canvas {
         self.history.push(state);
     }
     
+    pub fn undo(&mut self) {
+        if let Some(state) = self.history.undo() {
+            self.pixels = state.pixels.clone();
+            self.raster_splits = state.raster_splits.clone();
+            self.rebuild_occupied_positions();
+        }
+    }
+    
+    pub fn redo(&mut self) {
+        if let Some(state) = self.history.redo() {
+            self.pixels = state.pixels.clone();
+            self.raster_splits = state.raster_splits.clone();
+            self.rebuild_occupied_positions();
+        }
+    }
+    
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+    
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+    
+    fn rebuild_occupied_positions(&mut self) {
+        self.occupied_positions.clear();
+        for (scanline, splits) in &self.raster_splits {
+            for split in splits {
+                self.mark_occupied(*scanline, split.copper_x);
+            }
+        }
+    }
+    
     pub fn export_bitplane_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
         
