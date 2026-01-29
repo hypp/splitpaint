@@ -357,10 +357,17 @@ impl Canvas {
     
     fn rebuild_occupied_positions(&mut self) {
         self.occupied_positions.clear();
-        for (scanline, splits) in &self.raster_splits {
-            for split in splits {
-                self.mark_occupied(*scanline, split.copper_x);
-            }
+        
+        // Samla alla positioner först, sedan markera dem
+        let positions: Vec<(i32, u8)> = self.raster_splits
+            .iter()
+            .flat_map(|(scanline, splits)| {
+                splits.iter().map(move |split| (*scanline, split.copper_x))
+            })
+            .collect();
+        
+        for (scanline, copper_x) in positions {
+            self.mark_occupied(scanline, copper_x);
         }
     }
     

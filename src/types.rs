@@ -101,13 +101,13 @@ impl UndoHistory {
     }
 
     pub fn push(&mut self, state: CanvasState) {
-        // Ta bort alla states efter current (om vi undoat och sedan gjort något nytt)
+        // Delete all states after current to clear out if we did an undo
         self.states.truncate(self.current_index + 1);
         
         self.states.push(state);
         self.current_index = self.states.len() - 1;
         
-        // Begränsa historik (t.ex. 50 nivåer)
+        // Limit history
         if self.states.len() > 50 {
             self.states.remove(0);
             self.current_index -= 1;

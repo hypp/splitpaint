@@ -452,7 +452,6 @@ impl PixelArtApp {
                     self.canvas.push_undo_state();
 
                     if let Some((scanline, index)) = self.hovered_split {
-                        // Hämta split-ID
                         if let Some(splits) = self.canvas.raster_splits.get(&scanline) {
                             if let Some(split) = splits.get(index) {
                                 self.dragging_split = Some(split.id);
@@ -463,7 +462,6 @@ impl PixelArtApp {
 
                 if let Some(split_id) = self.dragging_split {
                     if response.dragged() {
-                        // Hitta splitsen med detta ID
                         let mut found: Option<(i32, usize)> = None;
                         for (scanline, splits) in &self.canvas.raster_splits {
                             for (i, split) in splits.iter().enumerate() {
