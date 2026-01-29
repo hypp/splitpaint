@@ -133,7 +133,26 @@ impl eframe::App for PixelArtApp {
                 });
                 
                 ui.menu_button("Edit", |ui| {
+                    if ui.add_enabled(self.canvas.can_undo(), egui::Button::new("Undo"))
+                        .on_hover_text("Ctrl+Z")
+                        .clicked() 
+                    {
+                        self.canvas.undo();
+                        ui.close_menu();
+                    }
+                    
+                    if ui.add_enabled(self.canvas.can_redo(), egui::Button::new("Redo"))
+                        .on_hover_text("Ctrl+Y or Ctrl+Shift+Z")
+                        .clicked() 
+                    {
+                        self.canvas.redo();
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    
                     if ui.button("Clear Canvas").clicked() {
+                        self.canvas.push_undo_state();
                         self.canvas.pixels = vec![false; self.canvas.width * self.canvas.height];
                         ui.close_menu();
                     }
@@ -144,6 +163,34 @@ impl eframe::App for PixelArtApp {
                 });
             });
         });
+        
+        // Keyboard shortcuts
+        if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
+            self.canvas.undo();
+        }
+        if ctx.input(|i| (i.key_pressed(egui::Key::Y) && i.modifiers.ctrl) || 
+                         (i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && i.modifiers.shift)) {
+            self.canvas.redo();
+        }
+        
+        // Tool shortcuts
+        if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+            self.active_tool = Tool::Pencil;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::E)) {
+            self.active_tool = Tool::Eraser;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+            self.active_tool = Tool::Line;
+        }
+        
+        // Layer shortcuts
+        if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
+            self.active_layer = Layer::Pixels;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Num2)) {
+            self.active_layer = Layer::RasterSplits;
+        }
         
         // Toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -157,6 +204,9 @@ impl eframe::App for PixelArtApp {
                 if ui.selectable_label(self.active_tool == Tool::Line, "📏 Line").clicked() {
                     self.active_tool = Tool::Line;
                 }
+                
+                ui.separator();
+                ui.label("⌨️ Shortcuts: P=Pencil | E=Eraser | L=Line | 1/2=Layers | Ctrl+Z=Undo | Ctrl+Y=Redo");
             });
         });
         
@@ -348,10 +398,10 @@ impl PixelArtApp {
                         if response.drag_started() || response.clicked() {
                             if mouse_pos.is_some() {
                                 if !self.drawing {
+                                    self.canvas.push_undo_state();
                                     self.draw_value = self.active_tool == Tool::Pencil;
                                     self.drawing = true;
                                 }
-                                self.canvas.push_undo_state();
                                 self.canvas.set_pixel(mouse_x as usize, mouse_y as usize, self.draw_value);
                                 self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                             }
@@ -359,7 +409,6 @@ impl PixelArtApp {
                         if response.dragged() {
                             if mouse_pos.is_some() {
                                 if let Some((x0, y0)) = self.draw_prev_pos {
-                                    self.canvas.push_undo_state();
                                     self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
                                     self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                                 }
