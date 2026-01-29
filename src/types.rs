@@ -131,4 +131,12 @@ impl UndoHistory {
             None
         }
     }
+    
+    pub fn can_undo(&self) -> bool {
+        self.current_index > 0
+    }
+    
+    pub fn can_redo(&self) -> bool {
+        self.current_index < self.states.len() - 1
+    }
 }
