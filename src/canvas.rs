@@ -10,6 +10,7 @@ pub struct Canvas {
     pub show_pixel_layer: bool,
     pub show_raster_layer: bool,
     occupied_positions: std::collections::HashSet<(i32, u8)>,
+    history: UndoHistory,
 }
 
 impl Canvas {
@@ -22,6 +23,7 @@ impl Canvas {
             show_pixel_layer: true,
             show_raster_layer: true,
             occupied_positions: std::collections::HashSet::new(),
+            history: UndoHistory::new(),
         }
     }
     
@@ -323,6 +325,11 @@ impl Canvas {
             }
         }
     }
+
+    pub fn push_undo_state(&mut self) {
+        let state = CanvasState { pixels: self.pixels.clone(), raster_splits: self.raster_splits.clone()};
+        self.history.push(state);
+    }
     
     pub fn export_bitplane_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
@@ -451,4 +458,6 @@ impl Canvas {
         
         img.save(filename).map_err(|e| format!("PNG error: {}", e))
     }
+
+
 }

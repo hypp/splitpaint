@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{collections::BTreeMap, sync::atomic::{AtomicU64, Ordering}};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -83,4 +83,52 @@ pub struct ProjectData {
     pub width: usize,
     pub height: usize,
     pub raster_splits: std::collections::BTreeMap<i32, Vec<RasterSplit>>,
+}
+
+pub struct CanvasState {
+    pub pixels: Vec<bool>,
+    pub raster_splits: BTreeMap<i32, Vec<RasterSplit>>,
+}
+
+pub struct UndoHistory {
+    states: Vec<CanvasState>,
+    current_index: usize,
+}
+
+impl UndoHistory {
+    pub fn new() -> Self {
+        Self { states: Vec::new(), current_index: 0 }
+    }
+
+    pub fn push(&mut self, state: CanvasState) {
+        // Ta bort alla states efter current (om vi undoat och sedan gjort något nytt)
+        self.states.truncate(self.current_index + 1);
+        
+        self.states.push(state);
+        self.current_index = self.states.len() - 1;
+        
+        // Begränsa historik (t.ex. 50 nivåer)
+        if self.states.len() > 50 {
+            self.states.remove(0);
+            self.current_index -= 1;
+        }
+    }
+    
+    pub fn undo(&mut self) -> Option<&CanvasState> {
+        if self.current_index > 0 {
+            self.current_index -= 1;
+            Some(&self.states[self.current_index])
+        } else {
+            None
+        }
+    }
+    
+    pub fn redo(&mut self) -> Option<&CanvasState> {
+        if self.current_index < self.states.len() - 1 {
+            self.current_index += 1;
+            Some(&self.states[self.current_index])
+        } else {
+            None
+        }
+    }
 }

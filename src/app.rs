@@ -351,6 +351,7 @@ impl PixelArtApp {
                                     self.draw_value = self.active_tool == Tool::Pencil;
                                     self.drawing = true;
                                 }
+                                self.canvas.push_undo_state();
                                 self.canvas.set_pixel(mouse_x as usize, mouse_y as usize, self.draw_value);
                                 self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                             }
@@ -358,6 +359,7 @@ impl PixelArtApp {
                         if response.dragged() {
                             if mouse_pos.is_some() {
                                 if let Some((x0, y0)) = self.draw_prev_pos {
+                                    self.canvas.push_undo_state();
                                     self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
                                     self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                                 }
@@ -374,6 +376,7 @@ impl PixelArtApp {
                         
                         if response.drag_released() {
                             if let Some((x0, y0)) = self.line_start {
+                                self.canvas.push_undo_state();
                                 self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
                                 self.line_start = None;
                             }
@@ -397,6 +400,8 @@ impl PixelArtApp {
                 }
 
                 if response.drag_started() {
+                    self.canvas.push_undo_state();
+
                     if let Some((scanline, index)) = self.hovered_split {
                         // Hämta split-ID
                         if let Some(splits) = self.canvas.raster_splits.get(&scanline) {
