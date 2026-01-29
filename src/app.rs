@@ -110,7 +110,10 @@ impl eframe::App for PixelArtApp {
                             .pick_file()
                         {
                             match self.canvas.import_png(&path.to_string_lossy()) {
-                                Ok(_) => self.status_message = "PNG imported!".to_string(),
+                                Ok(_) => {
+                                    self.canvas.push_undo_state();  // Spara efter import
+                                    self.status_message = "PNG imported!".to_string();
+                                },
                                 Err(e) => self.status_message = e,
                             }
                         }
@@ -152,8 +155,8 @@ impl eframe::App for PixelArtApp {
                     ui.separator();
                     
                     if ui.button("Clear Canvas").clicked() {
-                        self.canvas.push_undo_state();
                         self.canvas.pixels = vec![false; self.canvas.width * self.canvas.height];
+                        self.canvas.push_undo_state();  // Spara EFTER clear
                         ui.close_menu();
                     }
                 });
@@ -272,7 +275,10 @@ impl eframe::App for PixelArtApp {
                         if ui.button("Add Split").clicked() {
                             let color = Color::new(self.dialog_color[0], self.dialog_color[1], self.dialog_color[2]);
                             match self.canvas.add_raster_split(self.dialog_scanline, self.dialog_x, self.dialog_channel, color) {
-                                Ok(_) => self.status_message = "Split added!".to_string(),
+                                Ok(_) => {
+                                    self.canvas.push_undo_state();  // Spara efter att split lagts till
+                                    self.status_message = "Split added!".to_string();
+                                },
                                 Err(e) => self.status_message = e,
                             }
                             self.show_add_dialog = false;
@@ -322,6 +328,7 @@ impl eframe::App for PixelArtApp {
                                 if ui.button("Apply").clicked() {
                                     let color = Color::new(self.edit_color[0], self.edit_color[1], self.edit_color[2]);
                                     self.canvas.update_split_color(scanline, index, color);
+                                    self.canvas.push_undo_state();  // Spara efter färgändring
                                     self.editing_split = None;
                                     self.status_message = "Split updated".to_string();
                                 }
@@ -398,7 +405,6 @@ impl PixelArtApp {
                         if response.drag_started() || response.clicked() {
                             if mouse_pos.is_some() {
                                 if !self.drawing {
-                                    self.canvas.push_undo_state();
                                     self.draw_value = self.active_tool == Tool::Pencil;
                                     self.drawing = true;
                                 }
@@ -416,17 +422,20 @@ impl PixelArtApp {
                         }
                         if response.drag_released() {
                             self.drawing = false;
+                            // Spara det modifierade tillståndet EFTER vi slutat rita
+                            self.canvas.push_undo_state();
                         }
                     }
                     Tool::Line => {
                         if response.drag_started() {
                             self.line_start = Some((mouse_x as usize, mouse_y as usize));
+                            self.draw_value = self.active_tool == Tool::Pencil;
                         }
                         
                         if response.drag_released() {
                             if let Some((x0, y0)) = self.line_start {
-                                self.canvas.push_undo_state();
                                 self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
+                                self.canvas.push_undo_state();  // Spara EFTER
                                 self.line_start = None;
                             }
                         }
@@ -438,6 +447,7 @@ impl PixelArtApp {
                 if response.secondary_clicked() {
                     if let Some((scanline, index)) = self.canvas.find_split_at(mouse_x, mouse_y, 9) {
                         self.canvas.remove_raster_split(scanline, index);
+                        self.canvas.push_undo_state();  // Spara efter borttagning
                         self.status_message = "Split deleted".to_string();
                     }
                 }
@@ -449,9 +459,8 @@ impl PixelArtApp {
                 }
 
                 if response.drag_started() {
-                    self.canvas.push_undo_state();
-
                     if let Some((scanline, index)) = self.hovered_split {
+                        // Hämta split-ID
                         if let Some(splits) = self.canvas.raster_splits.get(&scanline) {
                             if let Some(split) = splits.get(index) {
                                 self.dragging_split = Some(split.id);
@@ -462,6 +471,7 @@ impl PixelArtApp {
 
                 if let Some(split_id) = self.dragging_split {
                     if response.dragged() {
+                        // Hitta splitsen med detta ID
                         let mut found: Option<(i32, usize)> = None;
                         for (scanline, splits) in &self.canvas.raster_splits {
                             for (i, split) in splits.iter().enumerate() {
@@ -493,6 +503,7 @@ impl PixelArtApp {
                     
                     if response.drag_released() {
                         self.dragging_split = None;
+                        self.canvas.push_undo_state();  // Spara EFTER drag
                     }
                 }
 

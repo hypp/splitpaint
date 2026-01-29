@@ -15,7 +15,7 @@ pub struct Canvas {
 
 impl Canvas {
     pub fn new(width: usize, height: usize) -> Self {
-        Self {
+        let mut canvas = Self {
             width,
             height,
             pixels: vec![false; width * height],
@@ -24,7 +24,12 @@ impl Canvas {
             show_raster_layer: true,
             occupied_positions: std::collections::HashSet::new(),
             history: UndoHistory::new(),
-        }
+        };
+        
+        // Spara initial empty state
+        canvas.push_undo_state();
+        
+        canvas
     }
     
     pub fn pixel_to_copper(pixel_x: i32) -> u8 {
@@ -348,6 +353,7 @@ impl Canvas {
     }
     
     pub fn can_undo(&self) -> bool {
+        // Vi kan undo om current_index > 0 (vi har states att gå tillbaka till)
         self.history.can_undo()
     }
     
@@ -482,6 +488,10 @@ impl Canvas {
             
             self.import_bitplane_data(&data)?;
         }
+        
+        // Rensa undo-historik och spara det laddade projektet som första state
+        self.history = UndoHistory::new();
+        self.push_undo_state();
         
         Ok(())
     }

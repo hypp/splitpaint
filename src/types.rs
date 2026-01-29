@@ -101,16 +101,18 @@ impl UndoHistory {
     }
 
     pub fn push(&mut self, state: CanvasState) {
-        // Delete all states after current to clear out if we did an undo
-        self.states.truncate(self.current_index + 1);
+        // Om vi har undoat och sedan gör något nytt, ta bort framtida states
+        if !self.states.is_empty() {
+            self.states.truncate(self.current_index + 1);
+        }
         
         self.states.push(state);
         self.current_index = self.states.len() - 1;
         
-        // Limit history
+        // Begränsa historik (t.ex. 50 nivåer)
         if self.states.len() > 50 {
             self.states.remove(0);
-            self.current_index -= 1;
+            self.current_index = self.current_index.saturating_sub(1);
         }
     }
     
@@ -124,7 +126,7 @@ impl UndoHistory {
     }
     
     pub fn redo(&mut self) -> Option<&CanvasState> {
-        if self.current_index < self.states.len() - 1 {
+        if !self.states.is_empty() && self.current_index < self.states.len() - 1 {
             self.current_index += 1;
             Some(&self.states[self.current_index])
         } else {
@@ -133,10 +135,14 @@ impl UndoHistory {
     }
     
     pub fn can_undo(&self) -> bool {
-        self.current_index > 0
+        self.current_index > 0 && !self.states.is_empty()
     }
     
     pub fn can_redo(&self) -> bool {
-        self.current_index < self.states.len() - 1
+        !self.states.is_empty() && self.current_index < self.states.len() - 1
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
     }
 }
