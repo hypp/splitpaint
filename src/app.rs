@@ -15,18 +15,11 @@ pub struct PixelArtApp {
     draw_prev_pos: Option<(usize, usize)>,
     line_start: Option<(usize, usize)>,
     
-    // Raster split layer state
-    dragging_split: Option<u64>,
-    editing_split: Option<(i32, usize)>,
-    edit_color: [u8; 3],
-    hovered_split: Option<(i32, usize)>,
-    
-    // Add split dialog
-    show_add_dialog: bool,
-    dialog_scanline: i32,
-    dialog_x: i32,
-    dialog_channel: ColorChannel,
-    dialog_color: [u8; 3],
+    // Paint split state
+    paint_split_color: [u8; 3],
+    paint_split_channel: ColorChannel,
+    painting_splits: bool,
+    paint_prev_pos: Option<(i32, i32)>,
     
     // Cursor colors
     cursor_color0: Color,
@@ -47,15 +40,10 @@ impl Default for PixelArtApp {
             draw_value: true,
             line_start: None,
             draw_prev_pos: None,
-            dragging_split: None,
-            editing_split: None,
-            edit_color: [0xFF, 0xFF, 0xFF],
-            hovered_split: None,
-            show_add_dialog: false,
-            dialog_scanline: 0,
-            dialog_x: 0,
-            dialog_channel: ColorChannel::Color1,
-            dialog_color: [0xFF, 0x00, 0x00],
+            paint_split_color: [0xFF, 0x00, 0x00],
+            paint_split_channel: ColorChannel::Color1,
+            painting_splits: false,
+            paint_prev_pos: None,
             cursor_color0: Color::new(0, 0, 0),
             cursor_color1: Color::new(255, 255, 255),
             status_message: String::new(),
@@ -249,94 +237,39 @@ impl eframe::App for PixelArtApp {
                 ui.label(self.cursor_color1.to_hex());
             });
             
+            // Raster Split controls
+            if self.active_layer == Layer::RasterSplits {
+                ui.separator();
+                ui.label("Raster Split Paint");
+                
+                ui.horizontal(|ui| {
+                    ui.label("Channel:");
+                    ui.selectable_value(&mut self.paint_split_channel, ColorChannel::Color0, "Color 0");
+                    ui.selectable_value(&mut self.paint_split_channel, ColorChannel::Color1, "Color 1");
+                });
+                
+                ui.horizontal(|ui| {
+                    ui.label("Color:");
+                    if ui.color_edit_button_srgb(&mut self.paint_split_color).changed() {
+                        let snapped = Color::snap_to_amiga(
+                            self.paint_split_color[0],
+                            self.paint_split_color[1],
+                            self.paint_split_color[2]
+                        );
+                        self.paint_split_color = [snapped.r, snapped.g, snapped.b];
+                    }
+                });
+                
+                ui.label("Pencil: Paint 8px color strips");
+                ui.label("Eraser: Remove splits");
+                ui.label("Line: Draw straight splits");
+            }
+            
             if !self.status_message.is_empty() {
                 ui.separator();
                 ui.colored_label(egui::Color32::YELLOW, &self.status_message);
             }
         });
-        
-        // Add split dialog
-        if self.show_add_dialog {
-            egui::Window::new("Add Raster Split")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("Scanline: {}, X: {}", self.dialog_scanline, self.dialog_x));
-                    
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut self.dialog_channel, ColorChannel::Color0, "Color 0");
-                        ui.selectable_value(&mut self.dialog_channel, ColorChannel::Color1, "Color 1");
-                    });
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.show_add_dialog = false;
-                        }
-                        if ui.button("Add Split").clicked() {
-                            let color = Color::new(self.dialog_color[0], self.dialog_color[1], self.dialog_color[2]);
-                            match self.canvas.add_raster_split(self.dialog_scanline, self.dialog_x, self.dialog_channel, color) {
-                                Ok(_) => {
-                                    self.canvas.push_undo_state();  // Spara efter att split lagts till
-                                    self.status_message = "Split added!".to_string();
-                                },
-                                Err(e) => self.status_message = e,
-                            }
-                            self.show_add_dialog = false;
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        ui.label("Color:");
-                        if ui.color_edit_button_srgb(&mut self.dialog_color).changed() {
-                            let snapped = Color::snap_to_amiga(
-                                self.dialog_color[0],
-                                self.dialog_color[1],
-                                self.dialog_color[2]
-                            );
-                            self.dialog_color = [snapped.r, snapped.g, snapped.b];
-                        }
-                    });
-                });
-        }
-        
-        // Edit split dialog
-        if let Some((scanline, index)) = self.editing_split {
-            egui::Window::new("Edit Split")
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    if let Some(splits) = self.canvas.raster_splits.get(&scanline) {
-                        if let Some(split) = splits.get(index) {
-                            ui.label(format!("Line: {}, Copper: {}", scanline, split.copper_x));
-                            
-                            ui.horizontal(|ui| {
-                                ui.label("Color:");
-                                if ui.color_edit_button_srgb(&mut self.edit_color).changed() {
-                                    let snapped = Color::snap_to_amiga(
-                                        self.edit_color[0],
-                                        self.edit_color[1],
-                                        self.edit_color[2]
-                                    );
-                                    self.edit_color = [snapped.r, snapped.g, snapped.b];
-                                }
-                            });
-                            
-                            ui.horizontal(|ui| {
-                                if ui.button("Cancel").clicked() {
-                                    self.editing_split = None;
-                                }
-                                if ui.button("Apply").clicked() {
-                                    let color = Color::new(self.edit_color[0], self.edit_color[1], self.edit_color[2]);
-                                    self.canvas.update_split_color(scanline, index, color);
-                                    self.canvas.push_undo_state();  // Spara efter färgändring
-                                    self.editing_split = None;
-                                    self.status_message = "Split updated".to_string();
-                                }
-                            });
-                        }
-                    }
-                });
-        }
         
         // Canvas
         self.render_canvas(ctx);
@@ -394,6 +327,23 @@ impl PixelArtApp {
             if self.canvas.show_raster_layer {
                 self.draw_splits(&painter, &canvas_rect);
             }
+            
+            // Draw raster split preview
+            if self.active_layer == Layer::RasterSplits && mouse_pos.is_some() {
+                match self.active_tool {
+                    Tool::Pencil | Tool::Eraser => {
+                        self.draw_paint_split_preview(&painter, &canvas_rect, mouse_x, mouse_y);
+                    }
+                    Tool::Line => {
+                        // Show line preview while dragging
+                        if let Some((x0, y0)) = self.line_start {
+                            self.draw_split_line_preview(&painter, &canvas_rect, x0 as i32, y0 as i32, mouse_x, mouse_y);
+                        } else {
+                            self.draw_paint_split_preview(&painter, &canvas_rect, mouse_x, mouse_y);
+                        }
+                    }
+                }
+            }
         });
     }
     
@@ -422,19 +372,17 @@ impl PixelArtApp {
                         }
                         if response.drag_released() {
                             self.drawing = false;
-                            // Spara det modifierade tillståndet EFTER vi slutat rita
                             self.canvas.push_undo_state();
                         }
                     }
                     Tool::Line => {
                         if response.drag_started() {
                             self.line_start = Some((mouse_x as usize, mouse_y as usize));
-                            self.draw_value = self.active_tool == Tool::Pencil;
                         }
                         
                         if response.drag_released() {
                             if let Some((x0, y0)) = self.line_start {
-                                self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
+                                self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, true);
                                 self.canvas.push_undo_state();  // Spara EFTER
                                 self.line_start = None;
                             }
@@ -444,81 +392,87 @@ impl PixelArtApp {
             }
             
             Layer::RasterSplits => {
-                if response.secondary_clicked() {
-                    if let Some((scanline, index)) = self.canvas.find_split_at(mouse_x, mouse_y, 9) {
-                        self.canvas.remove_raster_split(scanline, index);
-                        self.canvas.push_undo_state();  // Spara efter borttagning
-                        self.status_message = "Split deleted".to_string();
-                    }
-                }
-
-                if mouse_pos.is_some() && self.dragging_split.is_none() {
-                    self.hovered_split = self.canvas.find_split_at(mouse_x, mouse_y, 9);
-                } else if self.dragging_split.is_none() {
-                    self.hovered_split = None;
-                }
-
-                if response.drag_started() {
-                    if let Some((scanline, index)) = self.hovered_split {
-                        // Hämta split-ID
-                        if let Some(splits) = self.canvas.raster_splits.get(&scanline) {
-                            if let Some(split) = splits.get(index) {
-                                self.dragging_split = Some(split.id);
+                match self.active_tool {
+                    Tool::Pencil => {
+                        if response.drag_started() || response.clicked() {
+                            if mouse_pos.is_some() {
+                                if !self.painting_splits {
+                                    self.painting_splits = true;
+                                }
+                                let color = Color::new(
+                                    self.paint_split_color[0],
+                                    self.paint_split_color[1],
+                                    self.paint_split_color[2]
+                                );
+                                let _ = self.canvas.set_raster_split(mouse_y, mouse_x, self.paint_split_channel, color);
+                                self.paint_prev_pos = Some((mouse_x, mouse_y));
                             }
-                        }
-                    }
-                }                
-
-                if let Some(split_id) = self.dragging_split {
-                    if response.dragged() {
-                        // Hitta splitsen med detta ID
-                        let mut found: Option<(i32, usize)> = None;
-                        for (scanline, splits) in &self.canvas.raster_splits {
-                            for (i, split) in splits.iter().enumerate() {
-                                if split.id == split_id {
-                                    found = Some((*scanline, i));
-                                    break;
+                        } 
+                        if response.dragged() {
+                            if mouse_pos.is_some() {
+                                if let Some((prev_x, prev_y)) = self.paint_prev_pos {
+                                    let color = Color::new(
+                                        self.paint_split_color[0],
+                                        self.paint_split_color[1],
+                                        self.paint_split_color[2]
+                                    );
+                                    self.canvas.draw_raster_line(prev_x, prev_y, mouse_x, mouse_y, self.paint_split_channel, color);
+                                    self.paint_prev_pos = Some((mouse_x, mouse_y));
                                 }
                             }
-                            if found.is_some() {
-                                break;
+                        }
+                        if response.drag_released() {
+                            self.painting_splits = false;
+                            self.paint_prev_pos = None;
+                            self.canvas.push_undo_state();
+                        }
+                    }
+                    Tool::Eraser => {
+                        if response.drag_started() || response.clicked() {
+                            if mouse_pos.is_some() {
+                                if !self.painting_splits {
+                                    self.painting_splits = true;
+                                }
+                                // Erase first point
+                                self.canvas.clear_raster_split(mouse_y, mouse_x, self.paint_split_channel);
+                                self.paint_prev_pos = Some((mouse_x, mouse_y));
                             }
                         }
                         
-                        if let Some((current_scanline, current_index)) = found {
-                            let desired_copper = Canvas::pixel_to_copper(mouse_x);
-                            
-                            let (valid_scanline, valid_copper) = self.canvas.find_nearest_valid_position(
-                                mouse_y, 
-                                desired_copper, 
-                                current_scanline, 
-                                current_index
-                            );
-                            
-                            let valid_pixel = Canvas::copper_to_pixel(valid_copper);
-                            
-                            let _ = self.canvas.move_raster_split(current_scanline, current_index, valid_scanline, valid_pixel);
-                        }
-                    }
-                    
-                    if response.drag_released() {
-                        self.dragging_split = None;
-                        self.canvas.push_undo_state();  // Spara EFTER drag
-                    }
-                }
-
-                if response.clicked() && self.dragging_split.is_none() {
-                    if let Some((scanline, index)) = self.hovered_split {
-                        if let Some(splits) = self.canvas.raster_splits.get(&scanline) {
-                            if let Some(split) = splits.get(index) {
-                                self.editing_split = Some((scanline, index));
-                                self.edit_color = [split.color.r, split.color.g, split.color.b];
+                        // Erase even if mouse has moved (without explicit drag event)
+                        if self.painting_splits && mouse_pos.is_some() {
+                            if let Some((prev_x, prev_y)) = self.paint_prev_pos {
+                                // Only erase if mouse actually moved
+                                if prev_x != mouse_x || prev_y != mouse_y {
+                                    self.canvas.erase_raster_line(prev_x, prev_y, mouse_x, mouse_y, self.paint_split_channel);
+                                    self.paint_prev_pos = Some((mouse_x, mouse_y));
+                                }
                             }
                         }
-                    } else {
-                        self.show_add_dialog = true;
-                        self.dialog_scanline = mouse_y;
-                        self.dialog_x = mouse_x;
+                        
+                        if response.drag_released() {
+                            self.painting_splits = false;
+                            self.paint_prev_pos = None;
+                            self.canvas.push_undo_state();
+                        }
+                    }
+                    Tool::Line => {
+                        if response.drag_started() {
+                            self.line_start = Some((mouse_x as usize, mouse_y as usize));
+                        }
+                        
+                        if response.drag_released() {
+                            if let Some((x0, y0)) = self.line_start {
+                                let color = Color::new(
+                                    self.paint_split_color[0],
+                                    self.paint_split_color[1],
+                                    self.paint_split_color[2]
+                                );
+                                self.canvas.draw_raster_line(x0 as i32, y0 as i32, mouse_x, mouse_y, self.paint_split_channel, color);
+                                self.canvas.push_undo_state();
+                                self.line_start = None;
+                            }
+                        }
                     }
                 }
             }
@@ -557,16 +511,19 @@ impl PixelArtApp {
             }
         }
 
-        if let Some((x0, y0)) = self.line_start {
-            let start = egui::pos2(
-                canvas_rect.left() + (x0 as i32 + BORDER_SIZE) as f32 * self.zoom,
-                canvas_rect.top() + (y0 as i32 + BORDER_SIZE) as f32 * self.zoom
-            );
-            let end = egui::pos2(
-                canvas_rect.left() + (mouse_x + BORDER_SIZE) as f32 * self.zoom,
-                canvas_rect.top() + (mouse_y + BORDER_SIZE) as f32 * self.zoom
-            );
-            painter.line_segment([start, end], Stroke::new(2.0, Color32::WHITE));
+        // Show line preview only on Pixels layer
+        if self.active_layer == Layer::Pixels {
+            if let Some((x0, y0)) = self.line_start {
+                let start = egui::pos2(
+                    canvas_rect.left() + (x0 as i32 + BORDER_SIZE) as f32 * self.zoom,
+                    canvas_rect.top() + (y0 as i32 + BORDER_SIZE) as f32 * self.zoom
+                );
+                let end = egui::pos2(
+                    canvas_rect.left() + (mouse_x + BORDER_SIZE) as f32 * self.zoom,
+                    canvas_rect.top() + (mouse_y + BORDER_SIZE) as f32 * self.zoom
+                );
+                painter.line_segment([start, end], Stroke::new(2.0, Color32::WHITE));
+            }
         }
     }
     
@@ -576,36 +533,82 @@ impl PixelArtApp {
                 continue;
             }
             
-            for (i, split) in splits.iter().enumerate() {
-                let is_hovered = self.hovered_split == Some((*scanline, i));
-                let is_dragging = self.dragging_split == Some(split.id);
-                
+            for split in splits.iter() {
                 let draw_pixel_x = Canvas::copper_to_pixel(split.copper_x);
                 let draw_y = *scanline;
 
                 let x_screen = canvas_rect.left() + (draw_pixel_x + BORDER_SIZE) as f32 * self.zoom;
-                let y_top = canvas_rect.top() + (draw_y + BORDER_SIZE) as f32 * self.zoom;
-                let y_bottom = y_top + self.zoom;
+                let y_screen = canvas_rect.top() + (draw_y + BORDER_SIZE) as f32 * self.zoom;
                 
-                let color = if is_hovered || is_dragging {
-                    egui::Color32::YELLOW
-                } else {
-                    egui::Color32::from_rgb(255, 128, 0)
-                };
-                
-                let stroke = egui::Stroke::new(if is_hovered { 3.0 } else { 2.0 }, color);
-                
-                painter.line_segment(
-                    [egui::pos2(x_screen, y_top), egui::pos2(x_screen, y_bottom)],
-                    stroke,
+                // Draw 8-pixel wide colored bar
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(x_screen, y_screen),
+                    egui::vec2(8.0 * self.zoom, self.zoom)
                 );
                 
-                painter.circle_filled(
-                    egui::pos2(x_screen, y_top + self.zoom / 2.0),
-                    if is_hovered { 4.0 } else { 3.0 },
-                    color,
-                );
+                // Draw the color from split
+                painter.rect_filled(rect, 0.0, split.color.to_egui_color32());
             }
         }
+    }
+    
+    fn draw_paint_split_preview(&self, painter: &egui::Painter, canvas_rect: &egui::Rect, mouse_x: i32, mouse_y: i32) {
+        // Konvertera till copper position
+        let copper_x = Canvas::pixel_to_copper(mouse_x);
+        let pixel_x = Canvas::copper_to_pixel(copper_x);
+        
+        // Rita en 8-pixel bred preview bar
+        let x_screen = canvas_rect.left() + (pixel_x + BORDER_SIZE) as f32 * self.zoom;
+        let y_screen = canvas_rect.top() + (mouse_y + BORDER_SIZE) as f32 * self.zoom;
+        
+        let preview_color = Color::new(
+            self.paint_split_color[0],
+            self.paint_split_color[1],
+            self.paint_split_color[2]
+        );
+        
+        // Rita 8 pixlar bred vertikal bar
+        for i in 0..8 {
+            let x = x_screen + i as f32 * self.zoom;
+            painter.line_segment(
+                [egui::pos2(x, y_screen), egui::pos2(x, y_screen + self.zoom)],
+                egui::Stroke::new(self.zoom, preview_color.to_egui_color32().gamma_multiply(0.7)),
+            );
+        }
+        
+        // Draw copper position indicator
+        painter.circle_stroke(
+            egui::pos2(x_screen + 4.0 * self.zoom, y_screen + self.zoom / 2.0),
+            6.0,
+            egui::Stroke::new(2.0, egui::Color32::WHITE),
+        );
+    }
+    
+    fn draw_split_line_preview(&self, painter: &egui::Painter, canvas_rect: &egui::Rect, x0: i32, y0: i32, x1: i32, y1: i32) {
+        // Draw a preview of the line that will be created
+        let start_copper = Canvas::pixel_to_copper(x0);
+        let end_copper = Canvas::pixel_to_copper(x1);
+        let start_pixel = Canvas::copper_to_pixel(start_copper);
+        let end_pixel = Canvas::copper_to_pixel(end_copper);
+        
+        let start_screen = egui::pos2(
+            canvas_rect.left() + (start_pixel + BORDER_SIZE) as f32 * self.zoom + 4.0 * self.zoom,
+            canvas_rect.top() + (y0 + BORDER_SIZE) as f32 * self.zoom + self.zoom / 2.0
+        );
+        let end_screen = egui::pos2(
+            canvas_rect.left() + (end_pixel + BORDER_SIZE) as f32 * self.zoom + 4.0 * self.zoom,
+            canvas_rect.top() + (y1 + BORDER_SIZE) as f32 * self.zoom + self.zoom / 2.0
+        );
+        
+        let preview_color = Color::new(
+            self.paint_split_color[0],
+            self.paint_split_color[1],
+            self.paint_split_color[2]
+        );
+        
+        painter.line_segment(
+            [start_screen, end_screen],
+            egui::Stroke::new(3.0, preview_color.to_egui_color32()),
+        );
     }
 }

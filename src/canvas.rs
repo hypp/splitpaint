@@ -115,45 +115,6 @@ impl Canvas {
         }
     }    
 
-    pub fn find_nearest_valid_position(&self, desired_scanline: i32, desired_copper: u8, exclude_scanline: i32, exclude_index: usize) -> (i32, u8) {
-        let mut best_pos = (desired_scanline, desired_copper);
-        let mut best_distance = f64::INFINITY;
-        
-        // Search scanlines within range
-        let y_range = 30;
-        let start_y = (desired_scanline - y_range).max(-BORDER_SIZE);
-        let end_y = (desired_scanline + y_range).min(self.height as i32 + BORDER_SIZE - 1);
-        
-        for scanline in start_y..=end_y {
-            for copper in (1..=225).step_by(2) {
-                // Check if position is occupied (excluding the split we're moving)
-                let is_excluded = scanline == exclude_scanline && 
-                    if let Some(splits) = self.raster_splits.get(&exclude_scanline) {
-                        exclude_index < splits.len() && splits[exclude_index].copper_x == copper
-                    } else {
-                        false
-                    };
-                
-                if !self.occupied_positions.contains(&(scanline, copper)) || is_excluded {
-                    // Calculate distance
-                    let dx = (Self::copper_to_pixel(copper) - Self::copper_to_pixel(desired_copper)) as f64;
-                    let dy = (scanline - desired_scanline) as f64;
-                    let distance = (dx * dx + dy * dy).sqrt();
-                    
-                    if distance < best_distance {
-                        best_distance = distance;
-                        best_pos = (scanline, copper);
-                        
-                        if distance < 1.0 {
-                            return best_pos;
-                        }
-                    }
-                }
-            }
-        }
-        
-        best_pos
-    }
 
     pub fn can_place_split(&self, scanline: i32, copper_x: u8, exclude_index: Option<usize>) -> bool {
         if let Some(splits) = self.raster_splits.get(&scanline) {
@@ -175,13 +136,38 @@ impl Canvas {
         true
     }
     
-    pub fn add_raster_split(&mut self, scanline: i32, pixel_x: i32, channel: ColorChannel, color: Color) -> Result<(), String> {
+
+
+    pub fn set_raster_split(&mut self, scanline: i32, pixel_x: i32, channel: ColorChannel, color: Color) -> Result<(), String> {
         let copper_x = Self::pixel_to_copper(pixel_x);
         
-        if !self.can_place_split(scanline, copper_x, None) {
-            return Err("Invalid position".to_string());
-        }
+        // Remove all splits within 4 pixels on same scanline (any channel)
+        if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+            let mut indices_to_remove = Vec::new();
+            
+            for (i, split) in splits.iter().enumerate() {
+                let pixel_distance = (Self::copper_to_pixel(copper_x) - Self::copper_to_pixel(split.copper_x)).abs();
+                if pixel_distance <= 4 {
+                    indices_to_remove.push((i, split.copper_x));
+                }
+            }
+            
+            // Remove in reverse order to preserve indices
+            for &(index, _) in indices_to_remove.iter().rev() {
+                splits.remove(index);
+            }
+            
+            if splits.is_empty() {
+                self.raster_splits.remove(&scanline);
+            }
 
+            for &(_, removed_copper) in indices_to_remove.iter().rev() {
+                self.unmark_occupied(scanline, removed_copper);
+            }
+
+        }
+        
+        // Now add the new split
         self.mark_occupied(scanline, copper_x);
         
         self.raster_splits
@@ -196,13 +182,16 @@ impl Canvas {
         Ok(())
     }
     
-    pub fn remove_raster_split(&mut self, scanline: i32, index: usize) {
-        // Get copper_x and remove in one scope
-        let (copper_x, is_empty) = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
-            if index < splits.len() {
-                let copper_x = splits[index].copper_x;
+    pub fn clear_raster_split(&mut self, scanline: i32, pixel_x: i32, channel: ColorChannel) -> bool {
+        // Konvertera till copper position
+        let copper_x = Self::pixel_to_copper(pixel_x);
+        
+        // Find and remove split at this position and channel
+        let (removed_copper, is_empty) = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+            if let Some(index) = splits.iter().position(|s| s.copper_x == copper_x && s.channel == channel) {
+                let copper = splits[index].copper_x;
                 splits.remove(index);
-                (Some(copper_x), splits.is_empty())
+                (Some(copper), splits.is_empty())
             } else {
                 (None, false)
             }
@@ -210,97 +199,21 @@ impl Canvas {
             (None, false)
         };
         
-        // Now borrow is released, we can call unmark
-        if let Some(copper) = copper_x {
+        // Nu kan vi mutera self utan konflikt
+        if let Some(copper) = removed_copper {
             self.unmark_occupied(scanline, copper);
-        }
-        
-        // Remove empty entry
-        if is_empty {
-            self.raster_splits.remove(&scanline);
-        }
-    }
-
-    pub fn move_raster_split(&mut self, old_scanline: i32, index: usize, new_scanline: i32, new_pixel_x: i32) -> Result<(), String> {
-        let new_copper_x = Self::pixel_to_copper(new_pixel_x);
-        
-        let split = if let Some(splits) = self.raster_splits.get(&old_scanline) {
-            if index >= splits.len() {
-                return Err("Invalid index".to_string());
+            
+            if is_empty {
+                self.raster_splits.remove(&scanline);
             }
-            splits[index].clone()
+            
+            true
         } else {
-            return Err("Split not found".to_string());
-        };
-        
-        if old_scanline == new_scanline {
-            if !self.can_place_split(new_scanline, new_copper_x, Some(index)) {
-                return Err("Invalid position".to_string());
-            }
-        } else {
-            if !self.can_place_split(new_scanline, new_copper_x, None) {
-                return Err("Invalid position".to_string());
-            }
-        }
-        
-        // Unmark old position
-        self.unmark_occupied(old_scanline, split.copper_x);
-        
-        // Remove from old position
-        if let Some(splits) = self.raster_splits.get_mut(&old_scanline) {
-            splits.remove(index);
-            if splits.is_empty() && old_scanline != new_scanline {
-                self.raster_splits.remove(&old_scanline);
-            }
-        }
-        
-        // Mark new position
-        self.mark_occupied(new_scanline, new_copper_x);
-        
-        // Add to new position
-        let mut new_split = split;
-        new_split.copper_x = new_copper_x;
-        
-        self.raster_splits
-            .entry(new_scanline)
-            .or_insert_with(Vec::new)
-            .push(new_split);
-        
-        if let Some(splits) = self.raster_splits.get_mut(&new_scanline) {
-            splits.sort_by_key(|s| s.copper_x);
-        }
-        
-        Ok(())
-    }
-
-    pub fn update_split_color(&mut self, scanline: i32, index: usize, color: Color) {
-        if let Some(splits) = self.raster_splits.get_mut(&scanline) {
-            if index < splits.len() {
-                splits[index].color = color;
-            }
+            false
         }
     }
     
-    pub fn find_split_at(&self, pixel_x: i32, pixel_y: i32, tolerance: i32) -> Option<(i32, usize)> {
-        let mut best_distance = f64::INFINITY;
-        let mut best_match: Option<(i32, usize)> = None;
-        
-        for (scanline, splits) in &self.raster_splits {
-            for (i, split) in splits.iter().enumerate() {
-                let split_pixel_x = Self::copper_to_pixel(split.copper_x);
-                let dx = pixel_x - split_pixel_x;
-                let dy = pixel_y - scanline;
-                let distance = ((dx * dx + dy * dy) as f64).sqrt();
-                
-                if distance <= tolerance as f64 && distance < best_distance {
-                    best_distance = distance;
-                    best_match = Some((*scanline, i));
-                }
-            }
-        }
-        
-        best_match
-    }
+
 
     pub fn draw_line(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, value: bool) {
         let dx = (x1 as i32 - x0 as i32).abs();
@@ -316,6 +229,64 @@ impl Canvas {
             self.set_pixel(x as usize, y as usize, value);
             
             if x == x1 as i32 && y == y1 as i32 {
+                break;
+            }
+            
+            let e2 = 2 * err;
+            if e2 > -dy {
+                err -= dy;
+                x += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    pub fn draw_raster_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, channel: ColorChannel, color: Color) {
+        let dx = (x1 - x0).abs();
+        let dy = (y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx - dy;
+        
+        let mut x = x0;
+        let mut y = y0;
+        
+        loop {
+            let _ = self.set_raster_split(y, x, channel, color);
+            
+            if x == x1 && y == y1 {
+                break;
+            }
+            
+            let e2 = 2 * err;
+            if e2 > -dy {
+                err -= dy;
+                x += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+    
+    pub fn erase_raster_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, channel: ColorChannel) {
+        let dx = (x1 - x0).abs();
+        let dy = (y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx - dy;
+        
+        let mut x = x0;
+        let mut y = y0;
+        
+        loop {
+            self.clear_raster_split(y, x, channel);
+            
+            if x == x1 && y == y1 {
                 break;
             }
             
@@ -353,7 +324,6 @@ impl Canvas {
     }
     
     pub fn can_undo(&self) -> bool {
-        // Vi kan undo om current_index > 0 (vi har states att gå tillbaka till)
         self.history.can_undo()
     }
     
@@ -364,7 +334,7 @@ impl Canvas {
     fn rebuild_occupied_positions(&mut self) {
         self.occupied_positions.clear();
         
-        // Samla alla positioner först, sedan markera dem
+        // Collect all positions first, then mark them
         let positions: Vec<(i32, u8)> = self.raster_splits
             .iter()
             .flat_map(|(scanline, splits)| {
@@ -489,7 +459,7 @@ impl Canvas {
             self.import_bitplane_data(&data)?;
         }
         
-        // Rensa undo-historik och spara det laddade projektet som första state
+        // Clear undo history and save loaded project as first state
         self.history = UndoHistory::new();
         self.push_undo_state();
         

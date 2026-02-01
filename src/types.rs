@@ -22,7 +22,7 @@ pub enum Tool {
     Line,
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
 pub struct Color {
     pub r: u8,
     pub g: u8,
@@ -51,13 +51,13 @@ impl Color {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize,Debug)]
 pub enum ColorChannel {
     Color0,
     Color1,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RasterSplit {
     #[serde(skip, default = "RasterSplit::next_id")]
     pub id: u64,
@@ -101,7 +101,7 @@ impl UndoHistory {
     }
 
     pub fn push(&mut self, state: CanvasState) {
-        // Om vi har undoat och sedan gör något nytt, ta bort framtida states
+        // If we've undone and then do something new, remove future states
         if !self.states.is_empty() {
             self.states.truncate(self.current_index + 1);
         }
@@ -109,7 +109,7 @@ impl UndoHistory {
         self.states.push(state);
         self.current_index = self.states.len() - 1;
         
-        // Begränsa historik (t.ex. 50 nivåer)
+        // Limit history (e.g. 50 levels)
         if self.states.len() > 50 {
             self.states.remove(0);
             self.current_index = self.current_index.saturating_sub(1);
