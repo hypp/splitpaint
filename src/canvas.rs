@@ -70,15 +70,12 @@ impl Canvas {
         let mut current_color0 = self.get_last_color(ColorChannel::Color0, Color::new(0, 0, 0));
         let mut current_color1 = self.get_last_color(ColorChannel::Color1, Color::new(255, 255, 255));
         
-        for (y, splits) in &self.raster_splits {
-            if y > &scanline {
-                break;
-            } 
-            
+        // Use range to only iterate up to and including current scanline
+        for (&y, splits) in self.raster_splits.range(..=scanline) {
             for split in splits {
                 let split_pixel_x = Self::copper_to_pixel(split.copper_x);
                 
-                if y < &scanline || (y == &scanline && pixel_x >= split_pixel_x) {
+                if y < scanline || (y == scanline && pixel_x >= split_pixel_x) {
                     match split.channel {
                         ColorChannel::Color0 => current_color0 = split.color,
                         ColorChannel::Color1 => current_color1 = split.color,
@@ -142,7 +139,7 @@ impl Canvas {
         let copper_x = Self::pixel_to_copper(pixel_x);
         
         // Remove all splits within 4 pixels on same scanline (any channel)
-        if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+        let removed_coppers = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
             let mut indices_to_remove = Vec::new();
             
             for (i, split) in splits.iter().enumerate() {
@@ -152,19 +149,27 @@ impl Canvas {
                 }
             }
             
-            // Remove in reverse order to preserve indices
-            for &(index, _) in indices_to_remove.iter().rev() {
+            // Remove in reverse order to preserve indices and collect copper values
+            let mut coppers = Vec::new();
+            for &(index, removed_copper) in indices_to_remove.iter().rev() {
                 splits.remove(index);
+                coppers.push(removed_copper);
             }
             
-            if splits.is_empty() {
-                self.raster_splits.remove(&scanline);
-            }
-
-            for &(_, removed_copper) in indices_to_remove.iter().rev() {
-                self.unmark_occupied(scanline, removed_copper);
-            }
-
+            let is_empty = splits.is_empty();
+            (coppers, is_empty)
+        } else {
+            (Vec::new(), false)
+        };
+        
+        // Now unmark all removed coppers (borrow is released)
+        for copper in removed_coppers.0 {
+            self.unmark_occupied(scanline, copper);
+        }
+        
+        // Remove empty scanline
+        if removed_coppers.1 {
+            self.raster_splits.remove(&scanline);
         }
         
         // Now add the new split

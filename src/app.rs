@@ -27,6 +27,11 @@ pub struct PixelArtApp {
     
     // UI state
     status_message: String,
+    
+    // Cached rendering
+    cached_image: Option<egui::ColorImage>,
+    texture: Option<egui::TextureHandle>,
+    dirty_rect: Option<(usize, usize, usize, usize)>, // (min_x, min_y, max_x, max_y)
 }
 
 impl Default for PixelArtApp {
@@ -47,6 +52,9 @@ impl Default for PixelArtApp {
             cursor_color0: Color::new(0, 0, 0),
             cursor_color1: Color::new(255, 255, 255),
             status_message: String::new(),
+            cached_image: None,
+            texture: None,
+            dirty_rect: Some((0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT)), // Initial full redraw
         }
     }
 }
@@ -129,6 +137,7 @@ impl eframe::App for PixelArtApp {
                         .clicked() 
                     {
                         self.canvas.undo();
+                        self.mark_all_dirty();
                         ui.close_menu();
                     }
                     
@@ -137,6 +146,7 @@ impl eframe::App for PixelArtApp {
                         .clicked() 
                     {
                         self.canvas.redo();
+                        self.mark_all_dirty();
                         ui.close_menu();
                     }
                     
@@ -144,7 +154,8 @@ impl eframe::App for PixelArtApp {
                     
                     if ui.button("Clear Canvas").clicked() {
                         self.canvas.pixels = vec![false; self.canvas.width * self.canvas.height];
-                        self.canvas.push_undo_state();  // Spara EFTER clear
+                        self.canvas.push_undo_state();
+                        self.mark_all_dirty();
                         ui.close_menu();
                     }
                 });
@@ -158,10 +169,12 @@ impl eframe::App for PixelArtApp {
         // Keyboard shortcuts
         if ctx.input(|i| i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && !i.modifiers.shift) {
             self.canvas.undo();
+            self.mark_all_dirty();
         }
         if ctx.input(|i| (i.key_pressed(egui::Key::Y) && i.modifiers.ctrl) || 
                          (i.key_pressed(egui::Key::Z) && i.modifiers.ctrl && i.modifiers.shift)) {
             self.canvas.redo();
+            self.mark_all_dirty();
         }
         
         // Tool shortcuts
@@ -277,6 +290,57 @@ impl eframe::App for PixelArtApp {
 }
 
 impl PixelArtApp {
+    fn mark_dirty_pixel(&mut self, x: usize, y: usize) {
+        if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect {
+            self.dirty_rect = Some((
+                min_x.min(x),
+                min_y.min(y),
+                max_x.max(x + 1),
+                max_y.max(y + 1),
+            ));
+        } else {
+            self.dirty_rect = Some((x, y, x + 1, y + 1));
+        }
+    }
+    
+    fn mark_dirty_line(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        let min_x = x0.min(x1);
+        let min_y = y0.min(y1);
+        let max_x = x0.max(x1) + 1;
+        let max_y = y0.max(y1) + 1;
+        
+        if let Some((dirty_min_x, dirty_min_y, dirty_max_x, dirty_max_y)) = self.dirty_rect {
+            self.dirty_rect = Some((
+                dirty_min_x.min(min_x),
+                dirty_min_y.min(min_y),
+                dirty_max_x.max(max_x),
+                dirty_max_y.max(max_y),
+            ));
+        } else {
+            self.dirty_rect = Some((min_x, min_y, max_x, max_y));
+        }
+    }
+    
+    fn mark_dirty_scanline(&mut self, scanline: i32) {
+        if scanline >= 0 && scanline < self.canvas.height as i32 {
+            let y = scanline as usize;
+            if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect {
+                self.dirty_rect = Some((
+                    min_x.min(0),
+                    min_y.min(y),
+                    max_x.max(self.canvas.width),
+                    max_y.max(y + 1),
+                ));
+            } else {
+                self.dirty_rect = Some((0, y, self.canvas.width, y + 1));
+            }
+        }
+    }
+    
+    fn mark_all_dirty(&mut self) {
+        self.dirty_rect = Some((0, 0, self.canvas.width, self.canvas.height));
+    }
+    
     fn render_canvas(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let (response, painter) = ui.allocate_painter(
@@ -320,7 +384,7 @@ impl PixelArtApp {
             
             // Draw pixel layer
             if self.canvas.show_pixel_layer {
-                self.draw_pixels(&painter, &canvas_rect, mouse_x, mouse_y);
+                self.draw_pixels(&painter, &canvas_rect, mouse_x, mouse_y, ctx);
             }
             
             // Draw raster split layer
@@ -359,6 +423,7 @@ impl PixelArtApp {
                                     self.drawing = true;
                                 }
                                 self.canvas.set_pixel(mouse_x as usize, mouse_y as usize, self.draw_value);
+                                self.mark_dirty_pixel(mouse_x as usize, mouse_y as usize);
                                 self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                             }
                         }
@@ -366,6 +431,7 @@ impl PixelArtApp {
                             if mouse_pos.is_some() {
                                 if let Some((x0, y0)) = self.draw_prev_pos {
                                     self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
+                                    self.mark_dirty_line(x0, y0, mouse_x as usize, mouse_y as usize);
                                     self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                                 }
                             }
@@ -383,7 +449,8 @@ impl PixelArtApp {
                         if response.drag_released() {
                             if let Some((x0, y0)) = self.line_start {
                                 self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, true);
-                                self.canvas.push_undo_state();  // Spara EFTER
+                                self.mark_dirty_line(x0, y0, mouse_x as usize, mouse_y as usize);
+                                self.canvas.push_undo_state();
                                 self.line_start = None;
                             }
                         }
@@ -405,6 +472,7 @@ impl PixelArtApp {
                                     self.paint_split_color[2]
                                 );
                                 let _ = self.canvas.set_raster_split(mouse_y, mouse_x, self.paint_split_channel, color);
+                                self.mark_dirty_scanline(mouse_y);
                                 self.paint_prev_pos = Some((mouse_x, mouse_y));
                             }
                         } 
@@ -417,6 +485,12 @@ impl PixelArtApp {
                                         self.paint_split_color[2]
                                     );
                                     self.canvas.draw_raster_line(prev_x, prev_y, mouse_x, mouse_y, self.paint_split_channel, color);
+                                    // Mark all scanlines between prev_y and mouse_y as dirty
+                                    let min_y = prev_y.min(mouse_y);
+                                    let max_y = prev_y.max(mouse_y);
+                                    for y in min_y..=max_y {
+                                        self.mark_dirty_scanline(y);
+                                    }
                                     self.paint_prev_pos = Some((mouse_x, mouse_y));
                                 }
                             }
@@ -435,6 +509,7 @@ impl PixelArtApp {
                                 }
                                 // Erase first point
                                 self.canvas.clear_raster_split(mouse_y, mouse_x, self.paint_split_channel);
+                                self.mark_dirty_scanline(mouse_y);
                                 self.paint_prev_pos = Some((mouse_x, mouse_y));
                             }
                         }
@@ -445,6 +520,11 @@ impl PixelArtApp {
                                 // Only erase if mouse actually moved
                                 if prev_x != mouse_x || prev_y != mouse_y {
                                     self.canvas.erase_raster_line(prev_x, prev_y, mouse_x, mouse_y, self.paint_split_channel);
+                                    let min_y = prev_y.min(mouse_y);
+                                    let max_y = prev_y.max(mouse_y);
+                                    for y in min_y..=max_y {
+                                        self.mark_dirty_scanline(y);
+                                    }
                                     self.paint_prev_pos = Some((mouse_x, mouse_y));
                                 }
                             }
@@ -499,18 +579,81 @@ impl PixelArtApp {
         }
     }
     
-    fn draw_pixels(&self, painter: &egui::Painter, canvas_rect: &egui::Rect, mouse_x: i32, mouse_y: i32) {
-        for y in 0..self.canvas.height {
-            for x in 0..self.canvas.width {
-                let color = self.canvas.get_color_at(x, y);
-                let rect = egui::Rect::from_min_size(
-                    canvas_rect.min + egui::vec2((x as i32 + BORDER_SIZE) as f32 * self.zoom, (y as i32 + BORDER_SIZE) as f32 * self.zoom),
-                    egui::vec2(self.zoom, self.zoom),
-                );
-                painter.rect_filled(rect, 0.0, color.to_egui_color32());
+    fn draw_pixels(&mut self, painter: &egui::Painter, canvas_rect: &egui::Rect, mouse_x: i32, mouse_y: i32, ctx: &egui::Context) {
+        // Initialize cache if needed
+        if self.cached_image.is_none() {
+            self.cached_image = Some(egui::ColorImage::new(
+                [self.canvas.width, self.canvas.height],
+                egui::Color32::BLACK,
+            ));
+        }
+        
+        // Update dirty region
+        if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect.take() {
+            if let Some(image) = &mut self.cached_image {
+                // Get base colors
+                let base_color0 = self.canvas.get_last_color(ColorChannel::Color0, Color::new(0, 0, 0));
+                let base_color1 = self.canvas.get_last_color(ColorChannel::Color1, Color::new(255, 255, 255));
+                
+                for y in min_y..max_y.min(self.canvas.height) {
+                    // Get active colors at start of this scanline
+                    let (mut current_color0, mut current_color1) = self.canvas.get_active_colors(y as i32, 0);
+                    
+                    // Get splits on this scanline
+                    let mut split_changes = Vec::new();
+                    if let Some(splits) = self.canvas.raster_splits.get(&(y as i32)) {
+                        for split in splits {
+                            let split_pixel_x = Canvas::copper_to_pixel(split.copper_x);
+                            split_changes.push((split_pixel_x, split.channel, split.color));
+                        }
+                    }
+                    
+                    // Render this scanline
+                    let mut change_idx = 0;
+                    for x in min_x..max_x.min(self.canvas.width) {
+                        // Apply any color changes at this x position
+                        while change_idx < split_changes.len() && split_changes[change_idx].0 <= x as i32 {
+                            match split_changes[change_idx].1 {
+                                ColorChannel::Color0 => current_color0 = split_changes[change_idx].2,
+                                ColorChannel::Color1 => current_color1 = split_changes[change_idx].2,
+                            }
+                            change_idx += 1;
+                        }
+                        
+                        let color = if self.canvas.get_pixel(x, y) {
+                            current_color1.to_egui_color32()
+                        } else {
+                            current_color0.to_egui_color32()
+                        };
+                        
+                        image.pixels[y * self.canvas.width + x] = color;
+                    }
+                }
+                
+                // Update texture
+                self.texture = Some(ctx.load_texture(
+                    "canvas",
+                    image.clone(),
+                    egui::TextureOptions::NEAREST,
+                ));
             }
         }
-
+        
+        // Draw cached texture
+        if let Some(texture) = &self.texture {
+            let texture_rect = egui::Rect::from_min_size(
+                canvas_rect.min + egui::vec2(BORDER_SIZE as f32 * self.zoom, BORDER_SIZE as f32 * self.zoom),
+                egui::vec2(self.canvas.width as f32 * self.zoom, self.canvas.height as f32 * self.zoom),
+            );
+            
+            painter.image(
+                texture.id(),
+                texture_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        
         // Show line preview only on Pixels layer
         if self.active_layer == Layer::Pixels {
             if let Some((x0, y0)) = self.line_start {
