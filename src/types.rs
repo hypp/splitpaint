@@ -6,6 +6,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 pub const DEFAULT_WIDTH: usize = 320;
 pub const DEFAULT_HEIGHT: usize = 256;
 pub const COPPER_WAIT_DISTANCE: usize = 8;
+#[allow(dead_code)]
 pub const COPPER_WAIT_POS: usize = 4;
 pub const BORDER_SIZE: i32 = 66;
 
@@ -60,6 +61,7 @@ pub enum ColorChannel {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RasterSplit {
     #[serde(skip, default = "RasterSplit::next_id")]
+    #[allow(dead_code)]
     pub id: u64,
     #[serde(skip)]
     pub scanline: i32,
@@ -142,6 +144,7 @@ impl UndoHistory {
         !self.states.is_empty() && self.current_index < self.states.len() - 1
     }
     
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.states.is_empty()
     }

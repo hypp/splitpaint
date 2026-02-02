@@ -113,6 +113,7 @@ impl Canvas {
     }    
 
 
+    #[allow(dead_code)]
     pub fn can_place_split(&self, scanline: i32, copper_x: u8, exclude_index: Option<usize>) -> bool {
         if let Some(splits) = self.raster_splits.get(&scanline) {
             for (i, split) in splits.iter().enumerate() {
@@ -220,7 +221,8 @@ impl Canvas {
     
 
 
-    pub fn draw_line(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, value: bool) {
+    pub fn draw_line(&mut self, x0: usize, y0: usize, x1: usize, y1: usize, value: bool) -> Vec<(usize, usize)> {
+        let mut drawn_pixels = Vec::new();
         let dx = (x1 as i32 - x0 as i32).abs();
         let dy = (y1 as i32 - y0 as i32).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -232,6 +234,7 @@ impl Canvas {
         
         loop {
             self.set_pixel(x as usize, y as usize, value);
+            drawn_pixels.push((x as usize, y as usize));
             
             if x == x1 as i32 && y == y1 as i32 {
                 break;
@@ -247,6 +250,8 @@ impl Canvas {
                 y += sy;
             }
         }
+        
+        drawn_pixels
     }
 
     pub fn draw_raster_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, channel: ColorChannel, color: Color) {

@@ -303,24 +303,6 @@ impl PixelArtApp {
         }
     }
     
-    fn mark_dirty_line(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
-        let min_x = x0.min(x1);
-        let min_y = y0.min(y1);
-        let max_x = x0.max(x1) + 1;
-        let max_y = y0.max(y1) + 1;
-        
-        if let Some((dirty_min_x, dirty_min_y, dirty_max_x, dirty_max_y)) = self.dirty_rect {
-            self.dirty_rect = Some((
-                dirty_min_x.min(min_x),
-                dirty_min_y.min(min_y),
-                dirty_max_x.max(max_x),
-                dirty_max_y.max(max_y),
-            ));
-        } else {
-            self.dirty_rect = Some((min_x, min_y, max_x, max_y));
-        }
-    }
-    
     fn mark_dirty_scanline(&mut self, scanline: i32) {
         if scanline >= 0 && scanline < self.canvas.height as i32 {
             let y = scanline as usize;
@@ -430,8 +412,10 @@ impl PixelArtApp {
                         if response.dragged() {
                             if mouse_pos.is_some() {
                                 if let Some((x0, y0)) = self.draw_prev_pos {
-                                    self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
-                                    self.mark_dirty_line(x0, y0, mouse_x as usize, mouse_y as usize);
+                                    let drawn = self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, self.draw_value);
+                                    for (x, y) in drawn {
+                                        self.mark_dirty_pixel(x, y);
+                                    }
                                     self.draw_prev_pos = Some((mouse_x as usize, mouse_y as usize))
                                 }
                             }
@@ -448,8 +432,10 @@ impl PixelArtApp {
                         
                         if response.drag_released() {
                             if let Some((x0, y0)) = self.line_start {
-                                self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, true);
-                                self.mark_dirty_line(x0, y0, mouse_x as usize, mouse_y as usize);
+                                let drawn = self.canvas.draw_line(x0, y0, mouse_x as usize, mouse_y as usize, true);
+                                for (x, y) in drawn {
+                                    self.mark_dirty_pixel(x, y);
+                                }
                                 self.canvas.push_undo_state();
                                 self.line_start = None;
                             }
@@ -591,10 +577,6 @@ impl PixelArtApp {
         // Update dirty region
         if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect.take() {
             if let Some(image) = &mut self.cached_image {
-                // Get base colors
-                let base_color0 = self.canvas.get_last_color(ColorChannel::Color0, Color::new(0, 0, 0));
-                let base_color1 = self.canvas.get_last_color(ColorChannel::Color1, Color::new(255, 255, 255));
-                
                 for y in min_y..max_y.min(self.canvas.height) {
                     // Get active colors at start of this scanline
                     let (mut current_color0, mut current_color1) = self.canvas.get_active_colors(y as i32, 0);
