@@ -6,6 +6,7 @@ use egui::{Color32, Stroke};
 pub struct PixelArtApp {
     pub canvas: Canvas,
     pub zoom: f32,
+    pub pan_offset: (f32, f32), // (x, y) offset for panning
     pub active_layer: Layer,
     pub active_tool: Tool,
     
@@ -38,7 +39,6 @@ pub struct PixelArtApp {
     dirty_rect: Option<(usize, usize, usize, usize)>,
     pending_dirty_pixels: Vec<(usize, usize)>,
     last_render_time: std::time::Instant,
-    render_requested: bool, // Om en rendering har begärts men inte slutförts
 }
 
 impl Default for PixelArtApp {
@@ -46,6 +46,7 @@ impl Default for PixelArtApp {
         Self {
             canvas: Canvas::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
             zoom: 2.0,
+            pan_offset: (0.0, 0.0),
             active_layer: Layer::Pixels,
             active_tool: Tool::Pencil,
             drawing: false,
@@ -66,7 +67,6 @@ impl Default for PixelArtApp {
             dirty_rect: Some((0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT)),
             pending_dirty_pixels: Vec::new(),
             last_render_time: std::time::Instant::now(),
-            render_requested: false,
         }
     }
 }
@@ -334,7 +334,7 @@ impl eframe::App for PixelArtApp {
 
 impl PixelArtApp {
     fn mark_dirty_pixel(&mut self, x: usize, y: usize) {
-        // Lägg till i pending buffer istället för att uppdatera dirty_rect direkt
+        // Add to pending buffer instead of updating dirty_rect immediately
         self.pending_dirty_pixels.push((x, y));
     }
     
@@ -354,9 +354,9 @@ impl PixelArtApp {
         }
     }
     
-    fn mark_dirty_scanline(&mut self, scanline: i32) {
-        // Markera hela skärmen som dirty när en split ändras
-        // (enklare och korrekt, rendering sker async så det spelar mindre roll)
+    fn mark_dirty_scanline(&mut self, _scanline: i32) {
+        // Mark entire screen as dirty when a split changes
+        // (simpler and correct, rendering happens async so it matters less)
         self.dirty_rect = Some((0, 0, self.canvas.width, self.canvas.height));
     }
     
@@ -366,15 +366,101 @@ impl PixelArtApp {
     
     fn render_canvas(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Handle zoom FIRST, before allocating painter
+            let zoom_in = ui.input(|i| {
+                i.events.iter().any(|e| {
+                    if let egui::Event::Text(text) = e {
+                        text == "+" || text == "="
+                    } else {
+                        false
+                    }
+                })
+            });
+            
+            let zoom_out = ui.input(|i| {
+                i.events.iter().any(|e| {
+                    if let egui::Event::Text(text) = e {
+                        text == "-"
+                    } else {
+                        false
+                    }
+                })
+            });
+            
+            if zoom_in || zoom_out {
+                // Get mouse position BEFORE zoom
+                if let Some(mouse_screen) = ui.input(|i| i.pointer.hover_pos()) {
+                    // We need to calculate the old canvas_rect to get canvas coordinates
+                    let old_rect_min = egui::pos2(
+                        ui.available_rect_before_wrap().left() + self.pan_offset.0,
+                        ui.available_rect_before_wrap().top() + self.pan_offset.1
+                    );
+                    
+                    // Convert screen pos to canvas coordinates with current zoom
+                    let canvas_x_before = (mouse_screen.x - old_rect_min.x) / self.zoom;
+                    let canvas_y_before = (mouse_screen.y - old_rect_min.y) / self.zoom;
+                    
+                    if zoom_in {
+                        self.zoom = (self.zoom + 1.0).min(16.0);
+                    } else {
+                        self.zoom = (self.zoom - 1.0).max(1.0);
+                    }
+                    
+                    // Calculate where the same canvas point would be with new zoom
+                    let canvas_x_after_screen = canvas_x_before * self.zoom;
+                    let canvas_y_after_screen = canvas_y_before * self.zoom;
+                    
+                    // Adjust pan so mouse stays on same canvas point
+                    let mouse_x_relative = mouse_screen.x - ui.available_rect_before_wrap().left();
+                    let mouse_y_relative = mouse_screen.y - ui.available_rect_before_wrap().top();
+                    
+                    self.pan_offset.0 = mouse_x_relative - canvas_x_after_screen;
+                    self.pan_offset.1 = mouse_y_relative - canvas_y_after_screen;
+                }
+            }
+            
             let (response, painter) = ui.allocate_painter(
-                egui::vec2(
-                    (self.canvas.width as i32 + BORDER_SIZE * 2) as f32 * self.zoom,
-                    (self.canvas.height as i32 + BORDER_SIZE * 2) as f32 * self.zoom
-                ),
+                ui.available_size(),
                 egui::Sense::click_and_drag(),
             );
 
-            let canvas_rect = response.rect;
+            // Calculate canvas size with current zoom
+            let canvas_pixel_size = egui::vec2(
+                (self.canvas.width as i32 + BORDER_SIZE * 2) as f32 * self.zoom,
+                (self.canvas.height as i32 + BORDER_SIZE * 2) as f32 * self.zoom
+            );
+            
+            // Center canvas if it's smaller than viewport
+            let mut offset = egui::vec2(self.pan_offset.0, self.pan_offset.1);
+            if canvas_pixel_size.x < response.rect.width() {
+                offset.x = (response.rect.width() - canvas_pixel_size.x) / 2.0;
+            }
+            if canvas_pixel_size.y < response.rect.height() {
+                offset.y = (response.rect.height() - canvas_pixel_size.y) / 2.0;
+            }
+            
+            let canvas_rect = egui::Rect::from_min_size(
+                response.rect.min + offset,
+                canvas_pixel_size,
+            );
+            
+            // Handle panning with middle mouse button or space+drag
+            let is_panning = ui.input(|i| {
+                i.pointer.middle_down() || (i.key_down(egui::Key::Space) && i.pointer.primary_down())
+            });
+            
+            if is_panning {
+                if let Some(delta) = ui.input(|i| {
+                    if i.pointer.is_decidedly_dragging() {
+                        Some(i.pointer.delta())
+                    } else {
+                        None
+                    }
+                }) {
+                    self.pan_offset.0 += delta.x;
+                    self.pan_offset.1 += delta.y;
+                }
+            }
             let mouse_pos = response.hover_pos();
             
             let (mouse_x, mouse_y) = if let Some(pos) = mouse_pos {
@@ -399,8 +485,10 @@ impl PixelArtApp {
                 self.cursor_color1 = c1;
             }
             
-            // Handle interactions
-            self.handle_interactions(&response, mouse_pos, mouse_x, mouse_y);
+            // Handle interactions (skip if panning)
+            if !is_panning {
+                self.handle_interactions(&response, mouse_pos, mouse_x, mouse_y);
+            }
             
             // Draw border
             self.draw_border(&painter, &canvas_rect);
@@ -803,7 +891,7 @@ impl PixelArtApp {
         let copper_x = Canvas::pixel_to_copper(mouse_x);
         let pixel_x = Canvas::copper_to_pixel(copper_x);
         
-        // Rita en 8-pixel bred preview bar
+        // Draw a 8-pixel wide preview bar
         let x_screen = canvas_rect.left() + (pixel_x + BORDER_SIZE) as f32 * self.zoom;
         let y_screen = canvas_rect.top() + (mouse_y + BORDER_SIZE) as f32 * self.zoom;
         
@@ -822,9 +910,9 @@ impl PixelArtApp {
             );
         }
         
-        // Draw copper position indicator
+        // Draw copper position indicator at left edge
         painter.circle_stroke(
-            egui::pos2(x_screen + 4.0 * self.zoom, y_screen + self.zoom / 2.0),
+            egui::pos2(x_screen, y_screen + self.zoom / 2.0),
             6.0,
             egui::Stroke::new(2.0, egui::Color32::WHITE),
         );
