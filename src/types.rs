@@ -21,6 +21,7 @@ pub enum Tool {
     Pencil,
     Eraser,
     Line,
+    Eyedropper,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]

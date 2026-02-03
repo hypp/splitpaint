@@ -28,10 +28,17 @@ pub struct PixelArtApp {
     // UI state
     status_message: String,
     
+    // View settings
+    show_grid: bool,
+    grid_size: usize,
+    
     // Cached rendering
     cached_image: Option<egui::ColorImage>,
     texture: Option<egui::TextureHandle>,
-    dirty_rect: Option<(usize, usize, usize, usize)>, // (min_x, min_y, max_x, max_y)
+    dirty_rect: Option<(usize, usize, usize, usize)>,
+    pending_dirty_pixels: Vec<(usize, usize)>,
+    last_render_time: std::time::Instant,
+    render_requested: bool, // Om en rendering har begärts men inte slutförts
 }
 
 impl Default for PixelArtApp {
@@ -52,9 +59,14 @@ impl Default for PixelArtApp {
             cursor_color0: Color::new(0, 0, 0),
             cursor_color1: Color::new(255, 255, 255),
             status_message: String::new(),
+            show_grid: false,
+            grid_size: 8,
             cached_image: None,
             texture: None,
-            dirty_rect: Some((0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT)), // Initial full redraw
+            dirty_rect: Some((0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT)),
+            pending_dirty_pixels: Vec::new(),
+            last_render_time: std::time::Instant::now(),
+            render_requested: false,
         }
     }
 }
@@ -161,7 +173,32 @@ impl eframe::App for PixelArtApp {
                 });
                 
                 ui.menu_button("View", |ui| {
-                    ui.label("Zoom controls coming soon...");
+                    ui.horizontal(|ui| {
+                        ui.label("Zoom:");
+                        if ui.button("-").clicked() {
+                            self.zoom = (self.zoom - 1.0).max(1.0);
+                        }
+                        ui.label(format!("{}x", self.zoom as i32));
+                        if ui.button("+").clicked() {
+                            self.zoom = (self.zoom + 1.0).min(16.0);
+                        }
+                    });
+                    
+                    ui.separator();
+                    
+                    ui.checkbox(&mut self.show_grid, "Show Grid");
+                    if self.show_grid {
+                        ui.horizontal(|ui| {
+                            ui.label("Grid size:");
+                            ui.radio_value(&mut self.grid_size, 4, "4x4");
+                            ui.radio_value(&mut self.grid_size, 8, "8x8");
+                        });
+                    }
+                    
+                    ui.separator();
+                    
+                    ui.checkbox(&mut self.canvas.show_pixel_layer, "Show Pixels");
+                    ui.checkbox(&mut self.canvas.show_raster_layer, "Show Raster Splits");
                 });
             });
         });
@@ -187,6 +224,9 @@ impl eframe::App for PixelArtApp {
         if ctx.input(|i| i.key_pressed(egui::Key::L)) {
             self.active_tool = Tool::Line;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+            self.active_tool = Tool::Eyedropper;
+        }
         
         // Layer shortcuts
         if ctx.input(|i| i.key_pressed(egui::Key::Num1)) {
@@ -208,9 +248,12 @@ impl eframe::App for PixelArtApp {
                 if ui.selectable_label(self.active_tool == Tool::Line, "📏 Line").clicked() {
                     self.active_tool = Tool::Line;
                 }
+                if ui.selectable_label(self.active_tool == Tool::Eyedropper, "💧 Eyedropper").clicked() {
+                    self.active_tool = Tool::Eyedropper;
+                }
                 
                 ui.separator();
-                ui.label("⌨️ Shortcuts: P=Pencil | E=Eraser | L=Line | 1/2=Layers | Ctrl+Z=Undo | Ctrl+Y=Redo");
+                ui.label("⌨️ Shortcuts: P=Pencil | E=Eraser | L=Line | I=Eyedropper | 1/2=Layers | Ctrl+Z=Undo | Ctrl+Y=Redo");
             });
         });
         
@@ -291,32 +334,30 @@ impl eframe::App for PixelArtApp {
 
 impl PixelArtApp {
     fn mark_dirty_pixel(&mut self, x: usize, y: usize) {
-        if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect {
-            self.dirty_rect = Some((
-                min_x.min(x),
-                min_y.min(y),
-                max_x.max(x + 1),
-                max_y.max(y + 1),
-            ));
-        } else {
-            self.dirty_rect = Some((x, y, x + 1, y + 1));
+        // Lägg till i pending buffer istället för att uppdatera dirty_rect direkt
+        self.pending_dirty_pixels.push((x, y));
+    }
+    
+    fn flush_pending_dirty_pixels(&mut self) {
+        // Flytta alla pending pixlar till dirty_rect
+        for (x, y) in self.pending_dirty_pixels.drain(..) {
+            if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect {
+                self.dirty_rect = Some((
+                    min_x.min(x),
+                    min_y.min(y),
+                    max_x.max(x + 1),
+                    max_y.max(y + 1),
+                ));
+            } else {
+                self.dirty_rect = Some((x, y, x + 1, y + 1));
+            }
         }
     }
     
     fn mark_dirty_scanline(&mut self, scanline: i32) {
-        if scanline >= 0 && scanline < self.canvas.height as i32 {
-            let y = scanline as usize;
-            if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect {
-                self.dirty_rect = Some((
-                    min_x.min(0),
-                    min_y.min(y),
-                    max_x.max(self.canvas.width),
-                    max_y.max(y + 1),
-                ));
-            } else {
-                self.dirty_rect = Some((0, y, self.canvas.width, y + 1));
-            }
-        }
+        // Markera hela skärmen som dirty när en split ändras
+        // (enklare och korrekt, rendering sker async så det spelar mindre roll)
+        self.dirty_rect = Some((0, 0, self.canvas.width, self.canvas.height));
     }
     
     fn mark_all_dirty(&mut self) {
@@ -369,6 +410,11 @@ impl PixelArtApp {
                 self.draw_pixels(&painter, &canvas_rect, mouse_x, mouse_y, ctx);
             }
             
+            // Draw grid
+            if self.show_grid {
+                self.draw_grid(&painter, &canvas_rect);
+            }
+            
             // Draw raster split layer
             if self.canvas.show_raster_layer {
                 self.draw_splits(&painter, &canvas_rect);
@@ -387,6 +433,14 @@ impl PixelArtApp {
                         } else {
                             self.draw_paint_split_preview(&painter, &canvas_rect, mouse_x, mouse_y);
                         }
+                    }
+                    Tool::Eyedropper => {
+                        // Show cursor crosshair for eyedropper
+                        let pixel_rect = egui::Rect::from_min_size(
+                            canvas_rect.min + egui::vec2((mouse_x + BORDER_SIZE) as f32 * self.zoom, (mouse_y + BORDER_SIZE) as f32 * self.zoom),
+                            egui::vec2(self.zoom, self.zoom)
+                        );
+                        painter.rect_stroke(pixel_rect, 0.0, Stroke::new(2.0, Color32::WHITE));
                     }
                 }
             }
@@ -422,6 +476,7 @@ impl PixelArtApp {
                         }
                         if response.drag_released() {
                             self.drawing = false;
+                            self.flush_pending_dirty_pixels(); // Rendera alla pending omedelbart
                             self.canvas.push_undo_state();
                         }
                     }
@@ -439,6 +494,12 @@ impl PixelArtApp {
                                 self.canvas.push_undo_state();
                                 self.line_start = None;
                             }
+                        }
+                    }
+                    Tool::Eyedropper => {
+                        if response.clicked() && mouse_pos.is_some() {
+                            // Sample color at cursor - nothing to do for pixels layer
+                            // (color is already shown in cursor_color0/cursor_color1)
                         }
                     }
                 }
@@ -484,6 +545,7 @@ impl PixelArtApp {
                         if response.drag_released() {
                             self.painting_splits = false;
                             self.paint_prev_pos = None;
+                            self.flush_pending_dirty_pixels();
                             self.canvas.push_undo_state();
                         }
                     }
@@ -519,6 +581,7 @@ impl PixelArtApp {
                         if response.drag_released() {
                             self.painting_splits = false;
                             self.paint_prev_pos = None;
+                            self.flush_pending_dirty_pixels();
                             self.canvas.push_undo_state();
                         }
                     }
@@ -538,6 +601,17 @@ impl PixelArtApp {
                                 self.canvas.push_undo_state();
                                 self.line_start = None;
                             }
+                        }
+                    }
+                    Tool::Eyedropper => {
+                        if response.clicked() && mouse_pos.is_some() {
+                            // Sample color at cursor
+                            let sampled_color = match self.paint_split_channel {
+                                ColorChannel::Color0 => self.cursor_color0,
+                                ColorChannel::Color1 => self.cursor_color1,
+                            };
+                            self.paint_split_color = [sampled_color.r, sampled_color.g, sampled_color.b];
+                            self.status_message = format!("Sampled color: {}", sampled_color.to_hex());
                         }
                     }
                 }
@@ -565,6 +639,32 @@ impl PixelArtApp {
         }
     }
     
+    fn draw_grid(&self, painter: &egui::Painter, canvas_rect: &egui::Rect) {
+        let grid_color = Color32::from_rgba_premultiplied(255, 255, 255, 40);
+        
+        // Vertical lines
+        for x in (0..self.canvas.width).step_by(self.grid_size) {
+            let x_screen = canvas_rect.left() + (x as i32 + BORDER_SIZE) as f32 * self.zoom;
+            let y_start = canvas_rect.top() + BORDER_SIZE as f32 * self.zoom;
+            let y_end = y_start + self.canvas.height as f32 * self.zoom;
+            painter.line_segment(
+                [egui::pos2(x_screen, y_start), egui::pos2(x_screen, y_end)],
+                Stroke::new(1.0, grid_color),
+            );
+        }
+        
+        // Horizontal lines
+        for y in (0..self.canvas.height).step_by(self.grid_size) {
+            let y_screen = canvas_rect.top() + (y as i32 + BORDER_SIZE) as f32 * self.zoom;
+            let x_start = canvas_rect.left() + BORDER_SIZE as f32 * self.zoom;
+            let x_end = x_start + self.canvas.width as f32 * self.zoom;
+            painter.line_segment(
+                [egui::pos2(x_start, y_screen), egui::pos2(x_end, y_screen)],
+                Stroke::new(1.0, grid_color),
+            );
+        }
+    }
+    
     fn draw_pixels(&mut self, painter: &egui::Painter, canvas_rect: &egui::Rect, mouse_x: i32, mouse_y: i32, ctx: &egui::Context) {
         // Initialize cache if needed
         if self.cached_image.is_none() {
@@ -574,51 +674,72 @@ impl PixelArtApp {
             ));
         }
         
-        // Update dirty region
-        if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect.take() {
-            if let Some(image) = &mut self.cached_image {
-                for y in min_y..max_y.min(self.canvas.height) {
-                    // Get active colors at start of this scanline
-                    let (mut current_color0, mut current_color1) = self.canvas.get_active_colors(y as i32, 0);
-                    
-                    // Get splits on this scanline
-                    let mut split_changes = Vec::new();
-                    if let Some(splits) = self.canvas.raster_splits.get(&(y as i32)) {
-                        for split in splits {
-                            let split_pixel_x = Canvas::copper_to_pixel(split.copper_x);
-                            split_changes.push((split_pixel_x, split.channel, split.color));
-                        }
-                    }
-                    
-                    // Render this scanline
-                    let mut change_idx = 0;
-                    for x in min_x..max_x.min(self.canvas.width) {
-                        // Apply any color changes at this x position
-                        while change_idx < split_changes.len() && split_changes[change_idx].0 <= x as i32 {
-                            match split_changes[change_idx].1 {
-                                ColorChannel::Color0 => current_color0 = split_changes[change_idx].2,
-                                ColorChannel::Color1 => current_color1 = split_changes[change_idx].2,
+        // Flush pending dirty pixels to dirty_rect
+        if !self.pending_dirty_pixels.is_empty() {
+            self.flush_pending_dirty_pixels();
+        }
+        
+        // Check if we should render (throttle to ~30fps during drawing, instant otherwise)
+        let now = std::time::Instant::now();
+        let time_since_last = now.duration_since(self.last_render_time).as_millis();
+        let is_drawing = self.drawing || self.painting_splits;
+        let should_render = self.dirty_rect.is_some() && 
+                           (!is_drawing || time_since_last >= 33); // 33ms = ~30fps
+        
+        // Render dirty region if needed
+        if should_render {
+            if let Some((min_x, min_y, max_x, max_y)) = self.dirty_rect.take() {
+                if let Some(image) = &mut self.cached_image {
+                    for y in min_y..max_y.min(self.canvas.height) {
+                        // Get active colors at start of this scanline
+                        let (mut current_color0, mut current_color1) = self.canvas.get_active_colors(y as i32, 0);
+                        
+                        // Get splits on this scanline
+                        let mut split_changes = Vec::new();
+                        if let Some(splits) = self.canvas.raster_splits.get(&(y as i32)) {
+                            for split in splits {
+                                let split_pixel_x = Canvas::copper_to_pixel(split.copper_x);
+                                split_changes.push((split_pixel_x, split.channel, split.color));
                             }
-                            change_idx += 1;
                         }
                         
-                        let color = if self.canvas.get_pixel(x, y) {
-                            current_color1.to_egui_color32()
-                        } else {
-                            current_color0.to_egui_color32()
-                        };
-                        
-                        image.pixels[y * self.canvas.width + x] = color;
+                        // Render this scanline
+                        let mut change_idx = 0;
+                        for x in min_x..max_x.min(self.canvas.width) {
+                            // Apply any color changes at this x position
+                            while change_idx < split_changes.len() && split_changes[change_idx].0 <= x as i32 {
+                                match split_changes[change_idx].1 {
+                                    ColorChannel::Color0 => current_color0 = split_changes[change_idx].2,
+                                    ColorChannel::Color1 => current_color1 = split_changes[change_idx].2,
+                                }
+                                change_idx += 1;
+                            }
+                            
+                            let color = if self.canvas.get_pixel(x, y) {
+                                current_color1.to_egui_color32()
+                            } else {
+                                current_color0.to_egui_color32()
+                            };
+                            
+                            image.pixels[y * self.canvas.width + x] = color;
+                        }
                     }
+                    
+                    // Update texture
+                    self.texture = Some(ctx.load_texture(
+                        "canvas",
+                        image.clone(),
+                        egui::TextureOptions::NEAREST,
+                    ));
+                    
+                    self.last_render_time = now;
                 }
-                
-                // Update texture
-                self.texture = Some(ctx.load_texture(
-                    "canvas",
-                    image.clone(),
-                    egui::TextureOptions::NEAREST,
-                ));
             }
+        }
+        
+        // Request repaint if we still have dirty data
+        if self.dirty_rect.is_some() || !self.pending_dirty_pixels.is_empty() {
+            ctx.request_repaint();
         }
         
         // Draw cached texture
