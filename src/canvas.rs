@@ -188,35 +188,42 @@ impl Canvas {
         Ok(())
     }
     
-    pub fn clear_raster_split(&mut self, scanline: i32, pixel_x: i32, channel: ColorChannel) -> bool {
-        // Konvertera till copper position
+    pub fn clear_raster_split(&mut self, scanline: i32, pixel_x: i32) -> bool {
         let copper_x = Self::pixel_to_copper(pixel_x);
         
-        // Find and remove split at this position and channel
-        let (removed_copper, is_empty) = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
-            if let Some(index) = splits.iter().position(|s| s.copper_x == copper_x && s.channel == channel) {
-                let copper = splits[index].copper_x;
-                splits.remove(index);
-                (Some(copper), splits.is_empty())
-            } else {
-                (None, false)
+        // Find and remove all splits within 4 pixels on same scanline (any channel)
+        let (removed_coppers, is_empty) = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+            let mut to_remove = Vec::new();
+            
+            for (i, split) in splits.iter().enumerate() {
+                let pixel_distance = (Self::copper_to_pixel(copper_x) - Self::copper_to_pixel(split.copper_x)).abs();
+                if pixel_distance <= 4 {
+                    to_remove.push((i, split.copper_x));
+                }
             }
+            
+            // Remove in reverse order to preserve indices
+            let mut coppers = Vec::new();
+            for &(index, copper) in to_remove.iter().rev() {
+                splits.remove(index);
+                coppers.push(copper);
+            }
+            
+            (coppers, splits.is_empty())
         } else {
-            (None, false)
+            (Vec::new(), false)
         };
         
-        // Nu kan vi mutera self utan konflikt
-        if let Some(copper) = removed_copper {
-            self.unmark_occupied(scanline, copper);
-            
-            if is_empty {
-                self.raster_splits.remove(&scanline);
-            }
-            
-            true
-        } else {
-            false
+        // Now unmark all removed coppers
+        for copper in &removed_coppers {
+            self.unmark_occupied(scanline, *copper);
         }
+        
+        if is_empty {
+            self.raster_splits.remove(&scanline);
+        }
+        
+        !removed_coppers.is_empty()
     }
     
 
@@ -255,6 +262,7 @@ impl Canvas {
     }
 
     pub fn draw_raster_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, channel: ColorChannel, color: Color) {
+        // Step 1: Collect all points along the line using Bresenham
         let dx = (x1 - x0).abs();
         let dy = (y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -264,8 +272,10 @@ impl Canvas {
         let mut x = x0;
         let mut y = y0;
         
+        let mut points: Vec<(i32, i32)> = Vec::new(); // (scanline, pixel_x)
+        
         loop {
-            let _ = self.set_raster_split(y, x, channel, color);
+            points.push((y, x));
             
             if x == x1 && y == y1 {
                 break;
@@ -281,9 +291,110 @@ impl Canvas {
                 y += sy;
             }
         }
+        
+        // Step 2: Group points by scanline and convert to copper positions
+        let mut scanlines: std::collections::HashMap<i32, Vec<u8>> = std::collections::HashMap::new();
+        
+        for (scanline, pixel_x) in points {
+            let copper_x = Self::pixel_to_copper(pixel_x);
+            let copper_list = scanlines.entry(scanline).or_insert_with(Vec::new);
+            
+            // Only add if it's at least 8 pixels (2 copper positions) away from previous
+            let can_add = copper_list.is_empty() || 
+                         copper_list.iter().all(|&existing| (existing as i32 - copper_x as i32).abs() >= 2);
+            
+            if can_add && !copper_list.contains(&copper_x) {
+                copper_list.push(copper_x);
+            }
+        }
+        
+        // Step 3: For each scanline, remove existing splits in range, then add new ones
+        for (scanline, copper_positions) in scanlines {
+            if copper_positions.is_empty() {
+                continue;
+            }
+            
+            // Find the range of pixels we're affecting
+            let min_copper = *copper_positions.iter().min().unwrap();
+            let max_copper = *copper_positions.iter().max().unwrap();
+            let start_pixel = Self::copper_to_pixel(min_copper);
+            let end_pixel = Self::copper_to_pixel(max_copper);
+            
+            // Remove all existing splits in this range
+            let (coppers_to_unmark, should_remove_scanline) = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+                let mut to_remove = Vec::new();
+                for (i, split) in splits.iter().enumerate() {
+                    let split_pixel = Self::copper_to_pixel(split.copper_x);
+                    if split_pixel >= start_pixel && split_pixel <= end_pixel + 8 {
+                        to_remove.push((i, split.copper_x));
+                    }
+                }
+                
+                // Remove in reverse order and collect coppers
+                let mut coppers = Vec::new();
+                for &(index, copper) in to_remove.iter().rev() {
+                    splits.remove(index);
+                    coppers.push(copper);
+                }
+                
+                (coppers, splits.is_empty())
+            } else {
+                (Vec::new(), false)
+            };
+            
+            // Now unmark (borrow is released)
+            for copper in coppers_to_unmark {
+                self.unmark_occupied(scanline, copper);
+            }
+            
+            if should_remove_scanline {
+                self.raster_splits.remove(&scanline);
+            }
+            
+            // Add all new splits
+            for copper_x in copper_positions {
+                self.add_raster_split_direct(scanline, copper_x, channel, color);
+            }
+        }
     }
     
-    pub fn erase_raster_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, channel: ColorChannel) {
+    // Public method that adds a split without removing nearby ones (for continuous drawing)
+    pub fn add_raster_split_direct(&mut self, scanline: i32, copper_x: u8, channel: ColorChannel, color: Color) {
+        // Remove ALL existing splits at this copper_x (any channel - only one split per copper position)
+        let had_existing = if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+            let mut indices_to_remove = Vec::new();
+            for (i, split) in splits.iter().enumerate() {
+                if split.copper_x == copper_x {
+                    indices_to_remove.push(i);
+                }
+            }
+            
+            // Remove in reverse order
+            for &index in indices_to_remove.iter().rev() {
+                splits.remove(index);
+            }
+            
+            !indices_to_remove.is_empty()
+        } else {
+            false
+        };
+        
+        // Only mark as occupied if there wasn't already a split here
+        if !had_existing {
+            self.mark_occupied(scanline, copper_x);
+        }
+        
+        self.raster_splits
+            .entry(scanline)
+            .or_insert_with(Vec::new)
+            .push(RasterSplit::new(scanline, copper_x, channel, color));
+        
+        if let Some(splits) = self.raster_splits.get_mut(&scanline) {
+            splits.sort_by_key(|s| s.copper_x);
+        }
+    }
+    
+    pub fn erase_raster_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
         let dx = (x1 - x0).abs();
         let dy = (y1 - y0).abs();
         let sx = if x0 < x1 { 1 } else { -1 };
@@ -294,7 +405,7 @@ impl Canvas {
         let mut y = y0;
         
         loop {
-            self.clear_raster_split(y, x, channel);
+            self.clear_raster_split(y, x);
             
             if x == x1 && y == y1 {
                 break;

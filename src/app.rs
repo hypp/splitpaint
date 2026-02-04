@@ -619,7 +619,45 @@ impl PixelArtApp {
                                         self.paint_split_color[1],
                                         self.paint_split_color[2]
                                     );
-                                    self.canvas.draw_raster_line(prev_x, prev_y, mouse_x, mouse_y, self.paint_split_channel, color);
+                                    
+                                    // Draw line from prev to current
+                                    let dx = (mouse_x - prev_x).abs();
+                                    let dy = (mouse_y - prev_y).abs();
+                                    let sx = if prev_x < mouse_x { 1 } else { -1 };
+                                    let sy = if prev_y < mouse_y { 1 } else { -1 };
+                                    let mut err = dx - dy;
+                                    
+                                    let mut x = prev_x;
+                                    let mut y = prev_y;
+                                    let mut last_scanline = prev_y;
+                                    
+                                    loop {
+                                        let copper_x = Canvas::pixel_to_copper(x);
+                                        
+                                        // If we're on the same scanline as previous point, add directly
+                                        // Otherwise use set_raster_split to clear nearby splits first
+                                        if y == last_scanline {
+                                            self.canvas.add_raster_split_direct(y, copper_x, self.paint_split_channel, color);
+                                        } else {
+                                            let _ = self.canvas.set_raster_split(y, x, self.paint_split_channel, color);
+                                            last_scanline = y;
+                                        }
+                                        
+                                        if x == mouse_x && y == mouse_y {
+                                            break;
+                                        }
+                                        
+                                        let e2 = 2 * err;
+                                        if e2 > -dy {
+                                            err -= dy;
+                                            x += sx;
+                                        }
+                                        if e2 < dx {
+                                            err += dx;
+                                            y += sy;
+                                        }
+                                    }
+                                    
                                     // Mark all scanlines between prev_y and mouse_y as dirty
                                     let min_y = prev_y.min(mouse_y);
                                     let max_y = prev_y.max(mouse_y);
@@ -644,7 +682,7 @@ impl PixelArtApp {
                                     self.painting_splits = true;
                                 }
                                 // Erase first point
-                                self.canvas.clear_raster_split(mouse_y, mouse_x, self.paint_split_channel);
+                                self.canvas.clear_raster_split(mouse_y, mouse_x);
                                 self.mark_dirty_scanline(mouse_y);
                                 self.paint_prev_pos = Some((mouse_x, mouse_y));
                             }
@@ -655,7 +693,7 @@ impl PixelArtApp {
                             if let Some((prev_x, prev_y)) = self.paint_prev_pos {
                                 // Only erase if mouse actually moved
                                 if prev_x != mouse_x || prev_y != mouse_y {
-                                    self.canvas.erase_raster_line(prev_x, prev_y, mouse_x, mouse_y, self.paint_split_channel);
+                                    self.canvas.erase_raster_line(prev_x, prev_y, mouse_x, mouse_y);
                                     let min_y = prev_y.min(mouse_y);
                                     let max_y = prev_y.max(mouse_y);
                                     for y in min_y..=max_y {
@@ -686,6 +724,14 @@ impl PixelArtApp {
                                     self.paint_split_color[2]
                                 );
                                 self.canvas.draw_raster_line(x0 as i32, y0 as i32, mouse_x, mouse_y, self.paint_split_channel, color);
+                                
+                                // Mark all affected scanlines as dirty
+                                let min_y = (y0 as i32).min(mouse_y);
+                                let max_y = (y0 as i32).max(mouse_y);
+                                for y in min_y..=max_y {
+                                    self.mark_dirty_scanline(y);
+                                }
+                                
                                 self.canvas.push_undo_state();
                                 self.line_start = None;
                             }
